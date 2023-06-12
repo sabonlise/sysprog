@@ -164,10 +164,9 @@ static int coroutine_sort_f(void *context) {
 // so switch count in this case = work time in ms
 int main(int argc, char **argv)
 {
-    printf("Argc: %d\n", argc);
-    target_latency = atoi(argv[1]);
-
     coro_sched_init();
+    
+    target_latency = atoi(argv[1]);
     int file_count = argc - 2;
     // Work time quantum that is allowed for each coroutine before switching
     time_quantum = target_latency / file_count;
@@ -210,9 +209,8 @@ int main(int argc, char **argv)
         free(files[i].arr);
         free(files[i].name);
     }
-    
     free(files);
     free(result);
 
-	return 0;
+    return 0;
 }
