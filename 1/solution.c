@@ -154,8 +154,8 @@ static int coroutine_sort_f(void *context) {
     sort_file(file);
 
     uint64_t time_passed = file->yield_ctx->work_time;
-    printf("File %s: switch count %ld, work time: %llu ms (%llu microseconds)\n", file->name,
-           (unsigned long) coro_switch_count(this), (unsigned long long) US_TO_MS(time_passed), (unsigned long long) time_passed);
+    printf("File %s: switch count %lld, work time: %llu ms (%llu microseconds)\n", file->name,
+           (long long) coro_switch_count(this), (unsigned long long) US_TO_MS(time_passed), (unsigned long long) time_passed);
 
     return 0;
 
