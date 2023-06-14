@@ -7,19 +7,19 @@
 
 #define US_TO_MS(us) ((us / 1000))
 
+struct yield_context {
+    uint64_t work_time;
+    uint64_t last_yield_time;
+    uint64_t time_quantum;
+};
+
 struct File {
     int *arr;
     char *name;
     int size;
-    int id;
-    uint64_t work_time;
-    uint64_t last_yield_time;
+    struct yield_context *yield_ctx;
 };
 
-static long target_latency;
-static long time_quantum;
-
-struct File *files;
 
 void write_to_file(const char *file_name, int *arr, int arr_size) {
     FILE *file_p = fopen(file_name, "w");
@@ -47,13 +47,13 @@ static inline uint64_t get_monotonic_microseconds(void) {
     return us;
 }
 
-static inline uint64_t last_yield_time_diff(uint64_t time, int id) {
-    return time - files[id].last_yield_time;
+static inline uint64_t last_yield_time_diff(uint64_t time, struct yield_context* yield_ctx) {
+    return time - yield_ctx->last_yield_time;
 }
 
-void coro_update(uint64_t time, int id) {
-    files[id].work_time += last_yield_time_diff(time, id);
-    files[id].last_yield_time = get_monotonic_microseconds();
+void coro_update(uint64_t time, struct yield_context* yield_ctx) {
+    yield_ctx->work_time += last_yield_time_diff(time, yield_ctx);
+    yield_ctx->last_yield_time = get_monotonic_microseconds();
 }
 
 void swap(int *num1, int *num2) {
@@ -62,7 +62,7 @@ void swap(int *num1, int *num2) {
     *num2 = tmp;
 }
 
-void quick_sort(int *arr, int low, int high, int id) {
+void quick_sort(int *arr, int low, int high, struct yield_context* yield_ctx) {
     int mid = low + (high - low) / 2;
     int pivot = arr[mid];
     int i = low, j = high;
@@ -79,14 +79,14 @@ void quick_sort(int *arr, int low, int high, int id) {
         uint64_t us_now = get_monotonic_microseconds();
 
         // After exceeding allowed time quantum, yield and update coroutine information
-        if (time_quantum <= last_yield_time_diff(us_now, id)) {
+        if (yield_ctx->time_quantum <= last_yield_time_diff(us_now, yield_ctx)) {
             coro_yield();
-            coro_update(us_now, id);
+            coro_update(us_now, yield_ctx);
         }
     }
 
-    if (low < j) quick_sort(arr, low, j, id);
-    if (i < high) quick_sort(arr, i, high, id);
+    if (low < j) quick_sort(arr, low, j, yield_ctx);
+    if (i < high) quick_sort(arr, i, high, yield_ctx);
 }
 
 
@@ -99,7 +99,7 @@ void merge_sort(struct File* _files, int num_arrays, int *result, int maxsize) {
         pos = -1;
 
         for(int j = 0; j < num_arrays; j++) {
-            if (current_pos[j] >= files[j].size) continue;
+            if (current_pos[j] >= _files[j].size) continue;
             if (_files[j].arr[current_pos[j]] < min) {
                 pos = j;
                 min = _files[j].arr[current_pos[j]];
@@ -116,11 +116,10 @@ void merge_sort(struct File* _files, int num_arrays, int *result, int maxsize) {
 
 static void sort_file(struct File *file) {
     int count = 0, tmp, i = 0;
-    char* name = strdup(file->name);
 
-    printf("%s: entered function (%s)\n", name, file->name);
+    printf("%s: entered function\n", file->name);
 
-    FILE *file_p = fopen(name, "r");
+    FILE *file_p = fopen(file->name, "r");
     while(fscanf(file_p, "%d", &tmp) == 1) count++;
 
     file->size = count;
@@ -132,13 +131,16 @@ static void sort_file(struct File *file) {
     fclose(file_p);
 
     // Storing last yield time for current processed file right before performing quick sort for accurate results
-    file->last_yield_time = get_monotonic_microseconds();
-    quick_sort(file->arr, 0, count - 1, file->id);
+    file->yield_ctx->last_yield_time = get_monotonic_microseconds();
+    quick_sort(file->arr, 0, count - 1, file->yield_ctx);
 
-    file->name = strdup(name);
+    // If file was processed with the time less than given quantum, it won't update
+    // coroutine information inside sorting algorithm, so we have to handle this case separately after sorting
+    if (coro_switch_count(coro_this()) == 0) {
+        coro_update(get_monotonic_microseconds(), file->yield_ctx);
+    }
+
     write_to_file(file->name, file->arr, count);
-
-    free(name);
 }
 
 
@@ -151,35 +153,35 @@ static int coroutine_sort_f(void *context) {
 
     sort_file(file);
 
-    uint64_t time_passed = file->work_time;
-    printf("%s: switch count %lld, work time: %lu ms (%lu microseconds)\n", file->name,
+    uint64_t time_passed = file->yield_ctx->work_time;
+    printf("File %s: switch count %lld, work time: %lu ms (%lu microseconds)\n", file->name,
            coro_switch_count(this), US_TO_MS(time_passed), time_passed);
 
     return 0;
 
 }
 
-// ./main 6000 test1.txt test2.txt test3.txt test4.txt test5.txt test6.txt
+// ./a.out 6000 test1.txt test2.txt test3.txt test4.txt test5.txt test6.txt
 // 6 files, 6000 / 6 = 1000 us = 1 ms roughly given to one coroutine
 // so switch count in this case = work time in ms
 int main(int argc, char **argv)
 {
     coro_sched_init();
-    
-    target_latency = atoi(argv[1]);
+
+    uint64_t target_latency = (uint64_t) atoi(argv[1]);
     int file_count = argc - 2;
     // Work time quantum that is allowed for each coroutine before switching
-    time_quantum = target_latency / file_count;
+    uint64_t time_quantum = target_latency / file_count;
 
-    files = (struct File*) malloc(sizeof(struct File) * file_count);
+    struct File* files = (struct File*) malloc(sizeof(struct File) * file_count);
     uint64_t start_time = get_monotonic_milliseconds();
 
     for (int i = 2; i < argc; i++) {
         files[i - 2].name = strdup(argv[i]);
         files[i - 2].arr = (int *) malloc(sizeof(int));
-        files[i - 2].id = i - 2;
         files[i - 2].size = 0;
-        files[i - 2].work_time = 0;
+        files[i - 2].yield_ctx = (struct yield_context*) malloc(sizeof(struct yield_context*));
+        files[i - 2].yield_ctx->time_quantum = time_quantum;
 
         coro_new(coroutine_sort_f, (void *) &files[i - 2]);
     }
@@ -208,9 +210,10 @@ int main(int argc, char **argv)
     for (int i = 0; i < file_count; i++) {
         free(files[i].arr);
         free(files[i].name);
+        free(files[i].yield_ctx);
     }
+
     free(files);
     free(result);
-
     return 0;
 }
