@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdint.h>
+#include <errno.h>
 #include "libcoro.h"
 
 #define US_TO_MS(us) ((us / 1000))
@@ -43,7 +44,7 @@ static inline uint64_t get_monotonic_microseconds(void) {
     struct timespec ts;
 
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-    uint64_t us = ((uint64_t)ts.tv_sec) * 1000000 + ((uint64_t)ts.tv_nsec) / 1000;
+    uint64_t us = ((uint64_t) ts.tv_sec) * 1000000 + ((uint64_t) ts.tv_nsec) / 1000;
     return us;
 }
 
@@ -116,14 +117,23 @@ void merge_sort(struct File* _files, int num_arrays, int *result, int maxsize) {
 
 static void sort_file(struct File *file) {
     int count = 0, tmp, i = 0;
+    int *temp;
 
-    printf("%s: entered function\n", file->name);
+    // printf("%s: entered function\n", file->name);
 
     FILE *file_p = fopen(file->name, "r");
     while(fscanf(file_p, "%d", &tmp) == 1) count++;
 
     file->size = count;
-    file->arr = (int *) realloc(file->arr, sizeof(int) * count);
+    temp = (int *) realloc(file->arr, sizeof(int) * count);
+    if (temp == NULL) {
+        printf("Realloc failed: %s\n", strerror(errno));
+        free(file->arr);
+
+        exit(EXIT_FAILURE);
+    } else {
+        file->arr = temp;
+    }
 
     rewind(file_p);
 
@@ -149,8 +159,6 @@ static int coroutine_sort_f(void *context) {
 
     struct File *file = (struct File *) context;
 
-    printf("Started coroutine %s\n", file->name);
-
     sort_file(file);
 
     uint64_t time_passed = file->yield_ctx->work_time;
@@ -168,10 +176,25 @@ int main(int argc, char **argv)
 {
     coro_sched_init();
 
-    uint64_t target_latency = (uint64_t) atoi(argv[1]);
+    const char *nptr = argv[1];
+    char *endptr = NULL;
+
+    errno = 0;
+    uint64_t target_latency = (uint64_t) strtoul(nptr, &endptr, 10);
+
+    if ((nptr == endptr) || (target_latency == 0 && errno != 0) || errno == EINVAL) {
+        printf("Conversion error\n");
+        free(endptr);
+
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Target latency: %llu us\n", (unsigned long long) target_latency);
+
     int file_count = argc - 2;
     // Work time quantum that is allowed for each coroutine before switching
-    uint64_t time_quantum = target_latency / file_count;
+    uint64_t time_quantum = target_latency / ((uint64_t) file_count);
+    printf("Allowed time quantum: %llu us\n", (unsigned long long) time_quantum);
 
     struct File* files = (struct File*) malloc(sizeof(struct File) * file_count);
     uint64_t start_time = get_monotonic_milliseconds();
@@ -180,8 +203,9 @@ int main(int argc, char **argv)
         files[i - 2].name = strdup(argv[i]);
         files[i - 2].arr = (int *) malloc(sizeof(int));
         files[i - 2].size = 0;
-        files[i - 2].yield_ctx = (struct yield_context*) malloc(sizeof(struct yield_context*));
+        files[i - 2].yield_ctx = (struct yield_context*) malloc(sizeof(struct yield_context));
         files[i - 2].yield_ctx->time_quantum = time_quantum;
+        printf("Written time quantum: %llu us\n", (unsigned long long) files[i - 2].yield_ctx->time_quantum);
 
         coro_new(coroutine_sort_f, (void *) &files[i - 2]);
     }
@@ -199,7 +223,7 @@ int main(int argc, char **argv)
 
     int *result = calloc(resulting_size + 1, sizeof(int));
 
-    (void) merge_sort(files, file_count, result, resulting_size);
+    (void) merge_sort(files, (int) file_count, result, resulting_size);
     write_to_file("result.txt", result, resulting_size);
 
     uint64_t end_time = get_monotonic_milliseconds();
