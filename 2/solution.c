@@ -46,7 +46,7 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
         }
 
         if (pipe(fd) != 0) {
-            printf ("%s\n", strerror(errno));
+            printf("%s\n", strerror(errno));
             return errno;
         }
 
@@ -66,7 +66,7 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
 
                 if (redirect_ds == -1) {
                     printf("Redirect failed\n");
-                    printf ("%s\n", strerror(errno));
+                    printf("%s\n", strerror(errno));
                     return errno;
                 }
 
@@ -83,7 +83,7 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
 
             if (execvp(commands[i].name, commands[i].args) == -1) {
                 printf("Error occurred while executing command %s\n", commands[i].name);
-                printf ("%s\n", strerror(errno));
+                printf("%s\n", strerror(errno));
                 _exit(errno);
             }
             _exit(EXIT_FAILURE);
@@ -96,7 +96,6 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
     for (int i = 0; i < size; i++) {
         if (strcmp(commands[i].name, "cd") == 0) continue;
         if (waitpid(cmds[i], &status, 0) != cmds[i]) {
-            // printf("Error occurred\n");
             break;
         }
     }
@@ -157,7 +156,7 @@ int main() {
     int EXIT_CODE = 0;
 
     while(true) {
-        printf("$> ");
+        printf("> ");
         cmd *commands = (cmd*) malloc(sizeof(cmd));
         struct redirect_info *redirect = (struct redirect_info*) malloc(sizeof(struct redirect_info));
         redirect->is_appending = false;
@@ -174,7 +173,6 @@ int main() {
         bool eol = false;
 
         while (getline(&line, &size, stdin) != -1) {
-            // printf("1 Lines: %s - %s - %ld - %ld\n", lines, line, strlen(lines), strlen(line));
             size_t line_len = line ? strlen(line) : 0;
 
             if (line_len >= 2 && line[line_len - 2] == '\\' && line[line_len - 1] == '\n') {
@@ -187,8 +185,7 @@ int main() {
             }
             char *tmp;
 
-            size_t lines_len = lines ? strlen(lines) : 0;
-            tmp = realloc(lines, line_len + lines_len + 1);
+            tmp = realloc(lines, line_len + strlen(lines) + 1);
             if (tmp == NULL) {
                 free(lines);
                 exit(EXIT_FAILURE);
@@ -197,12 +194,11 @@ int main() {
             }
 
             strcat(lines, line);
-            lines_len = lines ? strlen(lines) : 0;
             if (eol) {
-                lines = realloc(lines, lines_len + 3);
-                lines[lines_len] = ' ';
-                lines[lines_len + 1] = ' ';
-                lines[lines_len + 2] = '\0';
+                lines = realloc(lines, strlen(lines) + 3);
+                lines[strlen(lines)] = ' ';
+                lines[strlen(lines) + 1] = ' ';
+                lines[strlen(lines) + 2] = '\0';
                 break;
             }
         }
@@ -211,7 +207,6 @@ int main() {
             (strlen(lines) == 1
             && ((lines[strlen(lines) - 1] == '\n')
             || (lines[strlen(lines) - 1] == '#')))) {
-            printf("um 4\n");
 
             free(line);
             free(lines);
@@ -223,22 +218,22 @@ int main() {
 
         char current_quote = 'a';
         bool inside_quotation = false;
-        bool escaping = false;
+        bool escaping_outside_quotes = false;
 
         for (size_t c = 0; c < (strlen(lines) - 1); c++) {
             size_t len = buf ? strlen(buf) : 0;
-            // printf("%c %c %d\n", lines[c], lines[c + 1], inside_quotation);
 
             if (!inside_quotation && lines[c] == '#') {
                 break;
             }
 
-            if (escaping) {
-                escaping = false;
+            if (!inside_quotation && lines[c] == '\\' && lines[c + 1] == ' ') {
+                // printf("Escape\n");
+                escaping_outside_quotes = true;
             }
 
-            if (lines[c] == '\\') {
-                escaping = true;
+            if (escaping_outside_quotes && lines[c] != '\\' && !isspace(lines[c])) {
+                escaping_outside_quotes = false;
             }
 
             if (lines[c] == '"' || lines[c] == '\'') {
@@ -253,7 +248,9 @@ int main() {
                 }
             }
 
-            if ((!isspace(lines[c]) && lines[c] != '|' && lines[c] != '>' && !inside_quotation) || inside_quotation) {
+            if ((!isspace(lines[c]) && lines[c] != '|' && lines[c] != '>' && !inside_quotation) || inside_quotation || escaping_outside_quotes) {
+                if (lines[c] == '\\') continue;
+
                 if (!inside_quotation && (lines[c] == '"' || lines[c] == '\'')) {
                     // continue;
                 } else {
@@ -273,7 +270,7 @@ int main() {
 
                     buf[len] = lines[c];
 
-                    if (c == (strlen(lines) - 2) && (!isspace(lines[c + 1]))) {
+                    if (c == (strlen(lines) - 2) && (!isspace(lines[c + 1])) && (lines[c + 1] != '\\')) {
                         buf[len + 1] = lines[c + 1];
                         buf[len + 2] = '\0';
                     } else {
@@ -318,7 +315,9 @@ int main() {
             if (!inside_quotation && (isspace(lines[c]) || (c == (strlen(lines) - 2)))) {
                 if (len == 0) continue;
 
-                printf("Current command %s\n", buf);
+                if (escaping_outside_quotes) continue;
+
+                // printf("Current command %s\n", buf);
 
                 if (c == (strlen(lines) - 2)) {
                     if (redirect->has_redirect) {
@@ -349,7 +348,7 @@ int main() {
             continue;
         }
 
-        test_commands(commands, cmd_count, redirect);
+        // test_commands(commands, cmd_count, redirect);
 
         if ((cmd_count == 1) && strcmp(commands[0].name, "exit") == 0) {
             if (curr_word == 2) {
@@ -365,7 +364,6 @@ int main() {
             break;
         }
 
-        test_commands(commands, cmd_count, redirect);
         EXIT_CODE = exec_commands(commands, cmd_count, redirect);
         free_commands(commands, cmd_count);
         if (redirect->has_redirect) {
@@ -374,6 +372,6 @@ int main() {
         free(redirect);
     }
 
-    printf("Exiting with exit code: %d\n", EXIT_CODE);
+    // printf("Exiting with exit code: %d\n", EXIT_CODE);
     return EXIT_CODE;
 }
