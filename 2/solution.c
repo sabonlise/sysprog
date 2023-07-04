@@ -28,7 +28,7 @@ struct redirect_info {
 int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
     int cmds[size];
     int fd[2];
-    int last_fd = 0;
+    int last_fd;
 
     int status = 0;
 
@@ -43,6 +43,17 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
                 printf("cd: %s: No such file or directory\n", commands[i].args[1]);
             }
             continue;
+        }
+
+        if (strcmp(commands[i].name, "exit") == 0) {
+            if (commands[i].arg_count == 2) {
+                status = atoi(commands[i].args[1]);
+            } else if (commands[i].arg_count == 1) {
+                status = 0;
+            } else {
+                printf("exit: too many arguments\n");
+                status = EXIT_FAILURE;
+            }
         }
 
         if (pipe(fd) != 0) {
@@ -75,6 +86,7 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
             }
 
             dup2(last_fd, STDIN_FILENO);
+            // close(last_fd);
 
             if (i != (size - 1)) {
                 dup2(fd[WRITE], STDOUT_FILENO);
@@ -82,8 +94,6 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
             close(fd[READ]);
 
             if (execvp(commands[i].name, commands[i].args) == -1) {
-                printf("Error occurred while executing command %s\n", commands[i].name);
-                printf("%s\n", strerror(errno));
                 _exit(errno);
             }
             _exit(EXIT_FAILURE);
@@ -93,9 +103,13 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
         }
     }
 
+    int pid = 0;
+
     for (int i = 0; i < size; i++) {
-        if (strcmp(commands[i].name, "cd") == 0) continue;
-        if (waitpid(cmds[i], &status, 0) != cmds[i]) {
+        if ((strcmp(commands[i].name, "cd") == 0) || (strcmp(commands[i].name, "yes") == 0)) continue;
+        // if (strcmp(commands[i].name, "cd") == 0) continue;
+        pid = waitpid(cmds[i], &status, 0);
+        if (pid != cmds[i]) {
             break;
         }
     }
@@ -151,9 +165,22 @@ void free_commands(cmd* commands, int size) {
     free(commands);
 }
 
+//void signal_term_handler()
+//{
+//
+//    exit(EXIT_SUCCESS);
+//}
+
 
 int main() {
     int EXIT_CODE = 0;
+    //    struct sigaction sigint_action;
+    //
+    //    sigint_action.sa_handler = &signal_term_handler;
+    //    sigemptyset(&sigint_action.sa_mask);
+    //
+    //    sigint_action.sa_flags = SA_RESETHAND;
+    //    sigaction(SIGTERM, &sigint_action, NULL);
 
     while(true) {
         printf("> ");
@@ -170,17 +197,35 @@ int main() {
         size_t size = 0;
         char *line = NULL;
         char *lines = calloc(1, sizeof(char));
+
         bool eol = false;
+        bool inside_quotation = false;
+        char current_quote = 'a';
 
         while (getline(&line, &size, stdin) != -1) {
             size_t line_len = line ? strlen(line) : 0;
 
-            if (line_len >= 2 && line[line_len - 2] == '\\' && line[line_len - 1] == '\n') {
-                line[strlen(line) - 2] = '\0';
+            for (size_t offset = 0; offset < line_len; offset++) {
+                if (line[offset] == '"' || line[offset] == '\'') {
+                    if (inside_quotation) {
+                        if (current_quote == line[offset]) {
+                            inside_quotation = false;
+                        }
+                    } else {
+                        current_quote = line[offset];
+                        inside_quotation = true;
+                    }
+                }
+            }
+
+            if (line_len >= 2 && ((line[line_len - 2] == '\\' && !inside_quotation) || inside_quotation) && line[line_len - 1] == '\n') {
+                if (!inside_quotation) {
+                    line[line_len - 2] = '\0';
+                }
             } else if (line_len == 1 && line[line_len - 1] == '\n') {
                 eol = true;
             } else {
-                line[strlen(line) - 1] = '\0';
+                line[line_len - 1] = '\0';
                 eol = true;
             }
             char *tmp;
@@ -193,12 +238,22 @@ int main() {
                 lines = tmp;
             }
 
-            strcat(lines, line);
+            strncat(lines, line, line_len);
             if (eol) {
-                lines = realloc(lines, strlen(lines) + 3);
-                lines[strlen(lines)] = ' ';
-                lines[strlen(lines) + 1] = ' ';
-                lines[strlen(lines) + 2] = '\0';
+                size_t new_len = lines ? strlen(lines) : 0;
+
+                char *temp;
+                temp = realloc(lines, new_len + 3);
+
+                if (temp == NULL) {
+                    free(lines);
+                    exit(EXIT_FAILURE);
+                } else {
+                    lines = temp;
+                }
+                char add_space = ' ';
+                strncat(lines, &add_space, 1);
+                strncat(lines, &add_space, 1);
                 break;
             }
         }
@@ -216,9 +271,9 @@ int main() {
             continue;
         }
 
-        char current_quote = 'a';
-        bool inside_quotation = false;
-        bool escaping_outside_quotes = false;
+        current_quote = 'a';
+        inside_quotation = false;
+        bool escaping_next_char = false;
 
         for (size_t c = 0; c < (strlen(lines) - 1); c++) {
             size_t len = buf ? strlen(buf) : 0;
@@ -227,13 +282,16 @@ int main() {
                 break;
             }
 
-            if (!inside_quotation && lines[c] == '\\' && lines[c + 1] == ' ') {
-                // printf("Escape\n");
-                escaping_outside_quotes = true;
+            if (lines[c] == '\\') {
+                if (escaping_next_char) {
+                    escaping_next_char = false;
+                } else {
+                    escaping_next_char = true;
+                }
             }
 
-            if (escaping_outside_quotes && lines[c] != '\\' && !isspace(lines[c])) {
-                escaping_outside_quotes = false;
+            if (escaping_next_char && lines[c] != '\\' && !isspace(lines[c])) {
+                escaping_next_char = false;
             }
 
             if (lines[c] == '"' || lines[c] == '\'') {
@@ -248,10 +306,11 @@ int main() {
                 }
             }
 
-            if ((!isspace(lines[c]) && lines[c] != '|' && lines[c] != '>' && !inside_quotation) || inside_quotation || escaping_outside_quotes) {
-                if (lines[c] == '\\') continue;
+            if ((!isspace(lines[c]) && lines[c] != '|' && lines[c] != '>' && !inside_quotation) || inside_quotation || escaping_next_char) {
+                if (inside_quotation && escaping_next_char && lines[c] == '\\' && lines[c + 1] == '\\') continue;
+                if (!inside_quotation && lines[c] == '\\' && escaping_next_char) continue;
 
-                if (!inside_quotation && (lines[c] == '"' || lines[c] == '\'')) {
+                if (!inside_quotation && (lines[c] == '"' || lines[c] == '\'') && !escaping_next_char) {
                     // continue;
                 } else {
                     char *tmp;
@@ -276,7 +335,6 @@ int main() {
                     } else {
                         buf[len + 1] = '\0';
                     }
-                    // printf("Command: %s\n", buf);
                     len = strlen(buf);
                 }
             }
@@ -315,9 +373,7 @@ int main() {
             if (!inside_quotation && (isspace(lines[c]) || (c == (strlen(lines) - 2)))) {
                 if (len == 0) continue;
 
-                if (escaping_outside_quotes) continue;
-
-                // printf("Current command %s\n", buf);
+                if (escaping_next_char && lines[c] != '\\') continue;
 
                 if (c == (strlen(lines) - 2)) {
                     if (redirect->has_redirect) {
@@ -331,11 +387,13 @@ int main() {
                 }
             }
         }
+
         free(line);
         free(lines);
         free(buf);
 
         if (cmd_count <= 1 && curr_word == 0) {
+
             if (redirect->has_redirect) {
                 free(redirect->to_file);
             }
@@ -349,7 +407,6 @@ int main() {
         }
 
         // test_commands(commands, cmd_count, redirect);
-
         if ((cmd_count == 1) && strcmp(commands[0].name, "exit") == 0) {
             if (curr_word == 2) {
                 EXIT_CODE = atoi(commands[0].args[1]);
@@ -362,16 +419,19 @@ int main() {
             free(redirect);
             free_commands(commands, cmd_count);
             break;
+        } else {
+            EXIT_CODE = exec_commands(commands, cmd_count, redirect);
         }
 
-        EXIT_CODE = exec_commands(commands, cmd_count, redirect);
         free_commands(commands, cmd_count);
         if (redirect->has_redirect) {
             free(redirect->to_file);
         }
         free(redirect);
+
     }
 
-    // printf("Exiting with exit code: %d\n", EXIT_CODE);
+    // fprintf(stderr, "Exiting with exit code: %d\n", EXIT_CODE);
+
     return EXIT_CODE;
 }
