@@ -13,6 +13,20 @@ parser.add_argument('--max', type=int, choices=[15, 20, 25], default=15,
 		    help='max points number')
 args = parser.parse_args()
 
+
+def get_python_shell():
+    possible_shells = ["python", "python3", "py"]
+    
+    for sh in possible_shells:
+        try:
+            process = subprocess.Popen([sh])
+            process.kill()
+            return sh
+        except FileNotFoundError:
+            pass
+            
+python_shell = get_python_shell()
+
 tests = [
 [
 "mkdir testdir",
@@ -59,7 +73,7 @@ tests = [
 	"f = open('test.txt', 'w')\\n\\\n"\
 	"f.write('Text\\\\\\n')\\n\\\n"\
 	"f.close()\\n\" > test.py",
-"python test.py | exit 0",
+f"{python_shell} test.py | exit 0",
 "cat test.txt",
 ],
 [
@@ -112,6 +126,9 @@ try:
 except subprocess.TimeoutExpired:
 	print('Too long no output. Probably you forgot to process EOF')
 	finish(-1)
+if p.returncode != 0:
+	print('Expected zero exit code')
+	finish(-1)
 
 if args.t:
 	print(output)
@@ -160,6 +177,31 @@ for test in tests:
 		finish(-1)
 	p.terminate()
 	if p.returncode != test[1]:
+		print('Wrong exit code in test "{}"'.format(test[0]))
+		print('Expected {}, got {}'.format(test[1], p.returncode))
+		exit_failure()
+
+# Exit code should be from the last used command.
+# edited: different return codes on different systems
+tests = [
+(["ls /"], (0,)),
+(["ls / | exit 123"], (123,)),
+(["ls /404"], (1, 2,)),
+(["ls /404", "echo test"], (0,)),
+]
+for test in tests:
+	p = open_new_shell()
+	try:
+		for cmd in test[0]:
+			p.stdin.write(cmd.encode() + b'\n')
+		p.stdin.close()
+		p.wait(1)
+	except subprocess.TimeoutExpired:
+		print('Too long no output. Probably you forgot to '\
+		      'handle "exit" manually')
+		finish(-1)
+	p.terminate()
+	if p.returncode not in test[1]:
 		print('Wrong exit code in test "{}"'.format(test[0]))
 		print('Expected {}, got {}'.format(test[1], p.returncode))
 		exit_failure()
