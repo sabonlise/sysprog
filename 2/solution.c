@@ -27,18 +27,25 @@ struct redirect_info {
 
 int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
     int cmds[size];
-    int fd[2];
-    int last_fd;
+    int old_fd[2];
+    int new_fd[2];
 
     int status = 0;
+
+    int last_exit_code = -1;
 
     if (redirect->has_redirect && !redirect->to_file) {
         printf("sh: syntax error near unexpected token `newline'");
         return EXIT_FAILURE;
     }
 
+    if (pipe(old_fd) != 0) {
+        return errno;
+    }
+
     for (int i = 0; i < size; i++) {
         if (strcmp(commands[i].name, "cd") == 0) {
+            if (commands[i].arg_count == 1) continue;
             if (chdir(commands[i].args[1]) == -1) {
                 printf("cd: %s: No such file or directory\n", commands[i].args[1]);
             }
@@ -54,11 +61,17 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
                 printf("exit: too many arguments\n");
                 status = EXIT_FAILURE;
             }
+
+            if (i == (size - 1)) {
+                last_exit_code = status;
+                break;
+            }
         }
 
-        if (pipe(fd) != 0) {
-            printf("%s\n", strerror(errno));
-            return errno;
+        if (i != (size - 1)) {
+            if (pipe(new_fd) != 0) {
+                return errno;
+            }
         }
 
         cmds[i] = fork();
@@ -76,8 +89,6 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
                 }
 
                 if (redirect_ds == -1) {
-                    printf("Redirect failed\n");
-                    printf("%s\n", strerror(errno));
                     return errno;
                 }
 
@@ -85,64 +96,85 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
                 close(redirect_ds);
             }
 
-            dup2(last_fd, STDIN_FILENO);
-            // close(last_fd);
+            if (i > 0) {
+                dup2(old_fd[READ], STDIN_FILENO);
+                close(old_fd[READ]);
+                close(old_fd[WRITE]);
+            }
 
             if (i != (size - 1)) {
-                dup2(fd[WRITE], STDOUT_FILENO);
+                close(new_fd[READ]);
+                dup2(new_fd[WRITE], STDOUT_FILENO);
+                close(new_fd[WRITE]);
             }
-            close(fd[READ]);
 
             if (execvp(commands[i].name, commands[i].args) == -1) {
                 _exit(errno);
             }
             _exit(EXIT_FAILURE);
         } else {
-            close(fd[WRITE]);
-            last_fd = fd[READ];
+            if (i > 0) {
+                close(old_fd[READ]);
+                close(old_fd[WRITE]);
+            }
+
+            if (i != (size - 1)) {
+                for (int j = 0; j < 2; j++) {
+                    old_fd[j] = new_fd[j];
+                }
+            }
         }
     }
+
+    close(old_fd[READ]);
+    close(old_fd[WRITE]);
 
     int pid = 0;
 
     for (int i = 0; i < size; i++) {
-        if ((strcmp(commands[i].name, "cd") == 0) || (strcmp(commands[i].name, "yes") == 0)) continue;
-        // if (strcmp(commands[i].name, "cd") == 0) continue;
+        if (strcmp(commands[i].name, "cd") == 0) continue;
         pid = waitpid(cmds[i], &status, 0);
         if (pid != cmds[i]) {
             break;
         }
     }
 
+    if (last_exit_code != -1) {
+        status = last_exit_code;
+    }
+
     return WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status);
 }
 
-void test_commands(cmd* commands, int size, struct redirect_info *redirect) {
-    for (int i = 0; i < size; i++) {
-        printf("Command #%d: %s\n", i + 1, commands[i].name);
-        for (int j = 0; j < commands[i].arg_count; j++) {
-            printf("Argument #%d: %s\n", j + 1, commands[i].args[j]);
-        }
-    }
+//void test_commands(cmd* commands, int size, struct redirect_info *redirect) {
+//    for (int i = 0; i < size; i++) {
+//        fprintf(stderr, "Command #%d: %s\n", i + 1, commands[i].name);
+//        for (int j = 0; j < commands[i].arg_count; j++) {
+//            fprintf(stderr, "Argument #%d: %s\n", j + 1, commands[i].args[j]);
+//        }
+//    }
+//
+//    if (redirect->has_redirect) {
+//        fprintf(stderr, "Redirecting to file: %s. Is appending: %d\n", redirect->to_file, redirect->is_appending);
+//    }
+//}
 
-    if (redirect->has_redirect) {
-        printf("Redirecting to file: %s. Is appending: %d\n", redirect->to_file, redirect->is_appending);
-    }
-}
-
-void write_command(cmd* commands, char *buf, int cmd_count, int *curr_word) {
+void write_command(cmd* commands, char *buf, int cmd_count, int *curr_word, int *current_capacity) {
     if (*curr_word == 0) {
         commands[cmd_count - 1].name = strdup(buf);
         commands[cmd_count - 1].args = (char**) malloc(sizeof(char*));
     } else if (*curr_word > 0) {
         char **tmp;
-        tmp = realloc(commands[cmd_count - 1].args, (*curr_word + 2) * sizeof(char*));
+        if (*curr_word >= *current_capacity - 4) {
+            *current_capacity = (int) (*current_capacity * 1.5);
+            tmp = realloc(commands[cmd_count - 1].args, *current_capacity * sizeof(char*));
 
-        if (tmp == NULL) {
-            free(commands[cmd_count - 1].args);
-            exit(EXIT_FAILURE);
-        } else {
-            commands[cmd_count - 1].args = tmp;
+            if (tmp == NULL) {
+                free(commands[cmd_count - 1].args);
+                exit(EXIT_FAILURE);
+            } else {
+                commands[cmd_count - 1].args = tmp;
+            }
         }
     }
 
@@ -165,26 +197,12 @@ void free_commands(cmd* commands, int size) {
     free(commands);
 }
 
-//void signal_term_handler()
-//{
-//
-//    exit(EXIT_SUCCESS);
-//}
-
 
 int main() {
     int EXIT_CODE = 0;
-    //    struct sigaction sigint_action;
-    //
-    //    sigint_action.sa_handler = &signal_term_handler;
-    //    sigemptyset(&sigint_action.sa_mask);
-    //
-    //    sigint_action.sa_flags = SA_RESETHAND;
-    //    sigaction(SIGTERM, &sigint_action, NULL);
 
     while(true) {
-        printf("> ");
-        cmd *commands = (cmd*) malloc(sizeof(cmd));
+        cmd *commands = (cmd*) calloc(1, sizeof(cmd));
         struct redirect_info *redirect = (struct redirect_info*) malloc(sizeof(struct redirect_info));
         redirect->is_appending = false;
         redirect->has_redirect = false;
@@ -194,15 +212,27 @@ int main() {
         int cmd_count = 1;
         int curr_word = 0;
 
+        int current_capacity = 4;
+
         size_t size = 0;
         char *line = NULL;
         char *lines = calloc(1, sizeof(char));
 
         bool eol = false;
         bool inside_quotation = false;
-        char current_quote = 'a';
+        char current_quote = '~';
 
-        while (getline(&line, &size, stdin) != -1) {
+        while (true) {
+            if (getline(&line, &size, stdin) == -1) {
+                // EOF
+                free(redirect);
+                free(commands);
+                free(buf);
+                free(line);
+                free(lines);
+                exit(EXIT_CODE);
+            }
+
             size_t line_len = line ? strlen(line) : 0;
 
             for (size_t offset = 0; offset < line_len; offset++) {
@@ -224,7 +254,7 @@ int main() {
                 }
             } else if (line_len == 1 && line[line_len - 1] == '\n') {
                 eol = true;
-            } else {
+            } else if (line_len > 1 && line[line_len - 1] == '\n') {
                 line[line_len - 1] = '\0';
                 eol = true;
             }
@@ -251,6 +281,7 @@ int main() {
                 } else {
                     lines = temp;
                 }
+                // Adding 2 extra spaces for correct parsing (they won't be included in commands anyway)
                 char add_space = ' ';
                 strncat(lines, &add_space, 1);
                 strncat(lines, &add_space, 1);
@@ -263,15 +294,15 @@ int main() {
             && ((lines[strlen(lines) - 1] == '\n')
             || (lines[strlen(lines) - 1] == '#')))) {
 
+            free(redirect);
             free(line);
             free(lines);
             free(buf);
             free(commands);
-            eol = false;
             continue;
         }
 
-        current_quote = 'a';
+        current_quote = '~';
         inside_quotation = false;
         bool escaping_next_char = false;
 
@@ -341,7 +372,7 @@ int main() {
 
             if (!inside_quotation && !isspace(lines[c]) &&
                 (lines[c + 1] == '|' || lines[c + 1] == '>') && lines[c] != '>') {
-                write_command(commands, buf, cmd_count, &curr_word);
+                write_command(commands, buf, cmd_count, &curr_word, &current_capacity);
                 continue;
             }
 
@@ -350,11 +381,13 @@ int main() {
                 if (lines[c + 1] == '>') {
                     redirect->is_appending = true;
                 }
+                commands[cmd_count - 1].args = realloc(commands[cmd_count - 1].args, (curr_word + 1) * sizeof(char*));
                 commands[cmd_count - 1].args[curr_word] = NULL;
                 continue;
             }
 
             if (!inside_quotation && lines[c] == '|') {
+                commands[cmd_count - 1].args = realloc(commands[cmd_count - 1].args, (curr_word + 1) * sizeof(char*));
                 commands[cmd_count - 1].args[curr_word] = NULL;
                 cmd *tmp;
                 tmp = realloc(commands, sizeof(cmd) * (++cmd_count));
@@ -379,14 +412,16 @@ int main() {
                     if (redirect->has_redirect) {
                         redirect->to_file = strdup(buf);
                     } else {
-                        write_command(commands, buf, cmd_count, &curr_word);
+                        write_command(commands, buf, cmd_count, &curr_word, &current_capacity);
+                        commands[cmd_count - 1].args = realloc(commands[cmd_count - 1].args, (curr_word + 1) * sizeof(char*));
                         commands[cmd_count - 1].args[curr_word] = NULL;
                     }
                 } else {
-                    write_command(commands, buf, cmd_count, &curr_word);
+                    write_command(commands, buf, cmd_count, &curr_word, &current_capacity);
                 }
             }
         }
+
 
         free(line);
         free(lines);
@@ -428,10 +463,7 @@ int main() {
             free(redirect->to_file);
         }
         free(redirect);
-
     }
-
-    // fprintf(stderr, "Exiting with exit code: %d\n", EXIT_CODE);
-
+    
     return EXIT_CODE;
 }
