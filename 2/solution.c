@@ -159,22 +159,19 @@ int exec_commands(cmd* commands, int size, struct redirect_info *redirect) {
 //    }
 //}
 
-void write_command(cmd* commands, char *buf, int cmd_count, int *curr_word, int *current_capacity) {
+void write_command(cmd* commands, char *buf, int cmd_count, int *curr_word) {
     if (*curr_word == 0) {
         commands[cmd_count - 1].name = strdup(buf);
         commands[cmd_count - 1].args = (char**) malloc(sizeof(char*));
     } else if (*curr_word > 0) {
         char **tmp;
-        if (*curr_word >= *current_capacity - 4) {
-            *current_capacity = (int) (*current_capacity * 1.5);
-            tmp = realloc(commands[cmd_count - 1].args, *current_capacity * sizeof(char*));
+        tmp = realloc(commands[cmd_count - 1].args, (*curr_word + 2) * sizeof(char*));
 
-            if (tmp == NULL) {
-                free(commands[cmd_count - 1].args);
-                exit(EXIT_FAILURE);
-            } else {
-                commands[cmd_count - 1].args = tmp;
-            }
+        if (tmp == NULL) {
+            free(commands[cmd_count - 1].args);
+            exit(EXIT_FAILURE);
+        } else {
+            commands[cmd_count - 1].args = tmp;
         }
     }
 
@@ -211,8 +208,6 @@ int main() {
 
         int cmd_count = 1;
         int curr_word = 0;
-
-        int current_capacity = 4;
 
         size_t size = 0;
         char *line = NULL;
@@ -284,7 +279,7 @@ int main() {
                 // Adding 2 extra spaces for correct parsing (they won't be included in commands anyway)
                 char add_space = ' ';
                 strncat(lines, &add_space, 1);
-                strncat(lines, &add_space, 1);
+                // strncat(lines, &add_space, 1);
                 break;
             }
         }
@@ -372,7 +367,7 @@ int main() {
 
             if (!inside_quotation && !isspace(lines[c]) &&
                 (lines[c + 1] == '|' || lines[c + 1] == '>') && lines[c] != '>') {
-                write_command(commands, buf, cmd_count, &curr_word, &current_capacity);
+                write_command(commands, buf, cmd_count, &curr_word);
                 continue;
             }
 
@@ -381,13 +376,11 @@ int main() {
                 if (lines[c + 1] == '>') {
                     redirect->is_appending = true;
                 }
-                commands[cmd_count - 1].args = realloc(commands[cmd_count - 1].args, (curr_word + 1) * sizeof(char*));
                 commands[cmd_count - 1].args[curr_word] = NULL;
                 continue;
             }
 
             if (!inside_quotation && lines[c] == '|') {
-                commands[cmd_count - 1].args = realloc(commands[cmd_count - 1].args, (curr_word + 1) * sizeof(char*));
                 commands[cmd_count - 1].args[curr_word] = NULL;
                 cmd *tmp;
                 tmp = realloc(commands, sizeof(cmd) * (++cmd_count));
@@ -412,12 +405,11 @@ int main() {
                     if (redirect->has_redirect) {
                         redirect->to_file = strdup(buf);
                     } else {
-                        write_command(commands, buf, cmd_count, &curr_word, &current_capacity);
-                        commands[cmd_count - 1].args = realloc(commands[cmd_count - 1].args, (curr_word + 1) * sizeof(char*));
+                        write_command(commands, buf, cmd_count, &curr_word);
                         commands[cmd_count - 1].args[curr_word] = NULL;
                     }
                 } else {
-                    write_command(commands, buf, cmd_count, &curr_word, &current_capacity);
+                    write_command(commands, buf, cmd_count, &curr_word);
                 }
             }
         }
@@ -464,6 +456,6 @@ int main() {
         }
         free(redirect);
     }
-    
+
     return EXIT_CODE;
 }
