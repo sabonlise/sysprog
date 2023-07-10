@@ -5,44 +5,42 @@
 #include <stdbool.h>
 
 enum {
-	BLOCK_SIZE = 512,
-	MAX_FILE_SIZE = 1024 * 1024 * 100,
+    BLOCK_SIZE = 512,
+    MAX_FILE_SIZE = 1024 * 1024 * 100,
 };
 
 /** Global error code. Set from any function on any error. */
 static enum ufs_error_code ufs_error_code = UFS_ERR_NO_ERR;
 
 struct block {
-	/** Block memory. */
-	char *memory;
-	/** How many bytes are occupied. */
-	int occupied;
-	/** Next block in the file. */
-	struct block *next;
-	/** Previous block in the file. */
-	struct block *prev;
+    /** Block memory. */
+    char *memory;
+    /** How many bytes are occupied. */
+    int occupied;
+    /** Next block in the file. */
+    struct block *next;
+    /** Previous block in the file. */
+    struct block *prev;
 
-	/* PUT HERE OTHER MEMBERS */
     int index;
 };
 
 struct file {
-	/** Double-linked list of file blocks. */
-	struct block *block_list;
-	/**
-	 * Last block in the list above for fast access to the end
-	 * of file.
-	 */
-	struct block *last_block;
-	/** How many file descriptors are opened on the file. */
-	int refs;
-	/** File name. */
-	char *name;
-	/** Files are stored in a double-linked list. */
-	struct file *next;
-	struct file *prev;
+    /** Double-linked list of file blocks. */
+    struct block *block_list;
+    /**
+     * Last block in the list above for fast access to the end
+     * of file.
+     */
+    struct block *last_block;
+    /** How many file descriptors are opened on the file. */
+    int refs;
+    /** File name. */
+    char *name;
+    /** Files are stored in a double-linked list. */
+    struct file *next;
+    struct file *prev;
 
-	/* PUT HERE OTHER MEMBERS */
     bool pending_deletion;
 };
 
@@ -50,11 +48,10 @@ struct file {
 static struct file *file_list = NULL;
 
 struct filedesc {
-	struct file *file;
+    struct file *file;
 
     int flags;
     int offset;
-	/* PUT HERE OTHER MEMBERS */
 };
 
 /**
@@ -67,10 +64,8 @@ static struct filedesc **file_descriptors = NULL;
 static int file_descriptor_count = 0;
 static int file_descriptor_capacity = 0;
 
-enum ufs_error_code
-ufs_errno()
-{
-	return ufs_error_code;
+enum ufs_error_code ufs_errno() {
+    return ufs_error_code;
 }
 
 struct file* find_file(const char *name) {
@@ -254,7 +249,7 @@ ufs_write(int fd, const char *buf, size_t size)
     }
 
     ufs_error_code = UFS_ERR_NO_ERR;
-	return bytes_written;
+    return bytes_written;
 }
 
 ssize_t ufs_read(int fd, char *buf, size_t size)
@@ -303,12 +298,14 @@ ssize_t ufs_read(int fd, char *buf, size_t size)
 
 void clear_file(struct file* file) {
     struct block* current_block = file->last_block;
+
     while (current_block != NULL) {
         free(current_block->memory);
         struct block* prev_block = current_block->prev;
         free(current_block);
         current_block = prev_block;
     }
+    
     free(file->name);
     free(file);
 }
@@ -335,7 +332,7 @@ int ufs_close(int fd) {
 }
 
 int ufs_delete(const char *filename) {
-	struct file* file = find_file(filename);
+    struct file* file = find_file(filename);
 
     if (file == NULL) {
         ufs_error_code = UFS_ERR_NO_FILE;
@@ -367,6 +364,7 @@ int ufs_delete(const char *filename) {
 
 void ufs_destroy(void) {
     struct file* current_file = file_list;
+
     while (current_file != NULL) {
         struct file* next_file = current_file->next;
         clear_file(current_file);
