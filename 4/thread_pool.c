@@ -10,7 +10,8 @@ enum status {
     TASK_WAITING,
     TASK_JOINED,
     TASK_COMPLETED,
-    TASK_CREATED
+    TASK_CREATED,
+    TASK_DETACHED
 };
 
 struct thread_task {
@@ -33,6 +34,7 @@ struct thread_pool {
     _Atomic int threads_count;
     _Atomic int max_threads;
     _Atomic int task_count;
+    _Atomic int tasks_in_progress;
 
     _Atomic bool is_deleted;
 
@@ -52,9 +54,10 @@ int thread_pool_new(int max_thread_count, struct thread_pool **pool) {
 
     atomic_init(&(*pool)->threads_count, 0);
     atomic_init(&(*pool)->task_count, 0);
+    atomic_init(&(*pool)->tasks_in_progress, 0);
 
     (*pool)->threads = malloc(max_thread_count * sizeof(pthread_t));
-    (*pool)->tasks = malloc(sizeof(struct thread_task) * TPOOL_MAX_TASKS);
+    (*pool)->tasks = (struct thread_task **) malloc(sizeof(struct thread_task) * TPOOL_MAX_TASKS);
     atomic_init(&(*pool)->is_deleted, false);
 
     pthread_mutex_init(&(*pool)->mutex, NULL);
@@ -68,19 +71,16 @@ int thread_pool_thread_count(const struct thread_pool *pool) {
 }
 
 int thread_pool_delete(struct thread_pool *pool) {
-    printf("current task count: %d\n", pool->task_count);
-    if (pool->task_count > 0) {
+    if (pool->task_count > 0 || pool->tasks_in_progress > 0) {
         return TPOOL_ERR_HAS_TASKS;
     }
 
     atomic_store(&pool->is_deleted, true);
 
-    pthread_mutex_lock(&pool->mutex);
     pthread_cond_broadcast(&pool->is_available_for_task);
-    pthread_mutex_unlock(&pool->mutex);
 
     for (int i = 0; i < pool->threads_count; i++) {
-        printf("thread count %d. joining thread %d\n", thread_pool_thread_count(pool), i);
+        // printf("thread count %d. joining thread %d\n", thread_pool_thread_count(pool), i);
         pthread_join(pool->threads[i], NULL);
     }
 
@@ -110,25 +110,34 @@ void *pool_worker(void *tpool) {
         }
 
         atomic_fetch_sub_explicit(&pool->task_count, 1, memory_order_acq_rel);
-
         struct thread_task *task = pool->tasks[pool->task_count];
+        atomic_fetch_add_explicit(&pool->tasks_in_progress, 1, memory_order_acq_rel);
+
         pthread_mutex_unlock(&pool->mutex);
 
-        atomic_store_explicit(&task->status, TASK_RUNNING, memory_order_relaxed);
+        pthread_mutex_lock(&task->mutex);
+        if (task->status != TASK_DETACHED) {
+            task->status = TASK_RUNNING;
+        }
+        pthread_mutex_unlock(&task->mutex);
 
         void *result = task->function(task->arg);
 
         pthread_mutex_lock(&task->mutex);
-        pthread_mutex_lock(&pool->mutex);
+        task->result = result;
 
-        atomic_store(&task->result, result);
-        atomic_store_explicit(&task->status, TASK_COMPLETED, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&pool->tasks_in_progress, 1, memory_order_acq_rel);
 
-        pthread_cond_signal(&task->is_completed);
-        // atomic_fetch_sub_explicit(&pool->threads_count, 1, memory_order_acq_rel);
+        if (task->status == TASK_DETACHED) {
+            task->status = TASK_JOINED;
+            pthread_mutex_unlock(&task->mutex);
+            thread_task_delete(task);
+            continue;
+        }
 
+        task->status = TASK_COMPLETED;
         pthread_mutex_unlock(&task->mutex);
-        pthread_mutex_unlock(&pool->mutex);
+        pthread_cond_signal(&task->is_completed);
     }
 
     return NULL;
@@ -140,20 +149,19 @@ int thread_pool_push_task(struct thread_pool *pool, struct thread_task *task) {
     }
 
     pthread_mutex_lock(&pool->mutex);
+
     pool->tasks[pool->task_count] = task;
     atomic_fetch_add_explicit(&pool->task_count, 1, memory_order_acq_rel);
 
-    atomic_store(&task->status, TASK_WAITING);
+    atomic_store_explicit(&task->status, TASK_WAITING, memory_order_relaxed);
 
-    printf("pushed new task. tasks in pool: %d. threads: %d\n", pool->task_count, pool->threads_count);
-
-    if (pool->max_threads > pool->threads_count && pool->task_count > pool->threads_count) {
+    if (pool->max_threads > pool->threads_count && pool->tasks_in_progress == pool->threads_count) {
         pthread_create(&(pool->threads[pool->threads_count]), NULL, pool_worker, (void*) pool);
         atomic_fetch_add_explicit(&pool->threads_count, 1, memory_order_acq_rel);
     }
 
-    pthread_cond_signal(&pool->is_available_for_task);
     pthread_mutex_unlock(&pool->mutex);
+    pthread_cond_signal(&pool->is_available_for_task);
 
     return 0;
 }
@@ -166,7 +174,6 @@ int thread_task_new(struct thread_task **task, thread_task_f function, void *arg
 
     pthread_mutex_init(&(*task)->mutex, NULL);
     pthread_cond_init(&(*task)->is_completed, NULL);
-    printf("created new task\n");
 
     return 0;
 }
@@ -190,9 +197,10 @@ int thread_task_join(struct thread_task *task, void **result) {
         pthread_cond_wait(&task->is_completed, &task->mutex);
     }
 
-    *result = task->result;
-    task->status = TASK_JOINED;
     pthread_mutex_unlock(&task->mutex);
+
+    *result = task->result;
+    atomic_store(&task->status, TASK_JOINED);
 
     return 0;
 }
@@ -216,22 +224,37 @@ int thread_task_delete(struct thread_task *task) {
         return TPOOL_ERR_TASK_IN_POOL;
     }
 
-    pthread_mutex_destroy(&task->mutex);
     pthread_cond_destroy(&task->is_completed);
+    pthread_mutex_destroy(&task->mutex);
 
     free(task);
+    task = NULL;
 
     return 0;
 }
 
 #ifdef NEED_DETACH
 
-int
-thread_task_detach(struct thread_task *task)
-{
-    /* IMPLEMENT THIS FUNCTION */
-    (void)task;
-    return TPOOL_ERR_NOT_IMPLEMENTED;
+int thread_task_detach(struct thread_task *task) {
+    if (task->status == TASK_CREATED) {
+        return TPOOL_ERR_TASK_NOT_PUSHED;
+    }
+
+    pthread_mutex_lock(&task->mutex);
+
+    if (task->status == TASK_COMPLETED) {
+        task->status = TASK_JOINED;
+        pthread_mutex_unlock(&task->mutex);
+        thread_task_delete(task);
+
+        return 0;
+    }
+
+    task->status = TASK_DETACHED;
+
+    pthread_mutex_unlock(&task->mutex);
+
+    return 0;
 }
 
 #endif
